@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Small LAN video download server. No third-party Python dependencies."""
-import json, os, re, secrets, shutil, signal, socket, subprocess, threading, time, uuid
+"""Local and cloud video download server. No third-party Python dependencies."""
+import hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, threading, time, uuid
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -15,7 +16,10 @@ STATIC_FILES = {
     '/favicon.svg': ('favicon.svg', 'image/svg+xml'),
     '/assets/course-logo.jpg': ('assets/course-logo.jpg', 'image/jpeg'),
 }
-PORT = int(os.environ.get('TUBEDROP_PORT', '8765'))
+PORT = int(os.environ.get('TUBEDROP_PORT') or os.environ.get('PORT', '8765'))
+CLOUD = os.environ.get('TUBEDROP_MODE') == 'cloud'
+PUBLIC_URL = os.environ.get('TUBEDROP_PUBLIC_URL', '').rstrip('/')
+RETENTION = 3600
 TOKEN = secrets.token_urlsafe(24)
 PYTHON = os.environ.get('TUBEDROP_PYTHON') or str(Path.home() / '.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3')
 if not Path(PYTHON).is_file():
@@ -30,6 +34,44 @@ JOBS = {}
 LOCK = threading.RLock()
 SLOT = threading.Semaphore(1)
 PLATFORMS = {'youtube': 'YouTube', 'instagram': 'Instagram', 'facebook': 'Facebook'}
+
+def download_root():
+    configured = os.environ.get('TUBEDROP_DOWNLOAD_DIR')
+    return Path(configured) if configured else ROOT/'downloads'
+
+def create_session(now=None):
+    expires = int(time.time() if now is None else now) + 86400
+    payload = secrets.token_urlsafe(24) + '.' + str(expires)
+    signature = hmac.new(TOKEN.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return payload + '.' + signature
+
+def read_session(raw, now=None):
+    try:
+        cookies = SimpleCookie(raw)
+        value = cookies['mpdl_session'].value
+        sid, expires, signature = value.split('.')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{32}', sid) or int(expires) <= (time.time() if now is None else now):
+            return None
+        expected = hmac.new(TOKEN.encode(), (sid + '.' + expires).encode(), hashlib.sha256).hexdigest()
+        return sid if hmac.compare_digest(signature, expected) else None
+    except (CookieError, KeyError, ValueError, TypeError):
+        return None
+
+def allowed_origin(origin, host):
+    if not origin: return not CLOUD
+    expected = {'https://' + host} if CLOUD else {'http://' + host}
+    if CLOUD and PUBLIC_URL: expected.add(PUBLIC_URL)
+    return origin in expected
+
+def cleanup_expired(now=None):
+    if not CLOUD: return
+    cutoff = (time.time() if now is None else now) - RETENTION
+    with LOCK:
+        for jid, job in list(JOBS.items()):
+            if job['state'] not in ('queued', 'running') and job.get('finished', job.get('created', 0)) < cutoff:
+                if re.fullmatch(r'[0-9a-f]{32}', jid):
+                    shutil.rmtree(download_root()/jid, ignore_errors=True)
+                del JOBS[jid]
 
 def platform_for_host(host):
     if host in ('youtu.be', 'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'):
@@ -139,7 +181,7 @@ def download_error(platform, detail):
     if any(x in lower for x in ('not available', 'unavailable', 'removed', '404')):
         return f'{name} 影片無法取得，可能已刪除、非公開或有地區限制。'
     if any(x in lower for x in ('timed out', 'unable to download', 'name resolution', 'nodename nor servname', 'network is unreachable')):
-        return f'無法連上 {name}，請確認 Mac 的網路連線，稍後再試。'
+        return f'無法連上 {name}，請稍後再試。'
     if 'requested format' in lower:
         return '來源沒有符合所選畫質的格式，請改選「最高可用畫質」；MP3 需要影片本身含有聲音。'
     return f'無法完成 {name} 下載。請確認網址含有公開影片；平台更新或存取限制也可能造成失敗。'
@@ -165,7 +207,7 @@ def worker(jid):
             job = JOBS[jid]
             if job['state'] == 'cancelled': return
             job['state'] = 'running'
-        folder = ROOT/'downloads'/jid
+        folder = download_root()/jid
         folder.mkdir(parents=True, exist_ok=True)
         log = []
         try:
@@ -209,14 +251,14 @@ def worker(jid):
                     hint = str(e) if isinstance(e, ValueError) else download_error(job['platform'], detail)
                     update(jid, state='error', message='無法完成下載', error=hint, details=detail)
         finally:
-            update(jid, process=None)
+            update(jid, process=None, finished=time.time())
 
 def public_job(job):
-    return {k:v for k,v in job.items() if k not in ('process', 'file')}
+    return {k:v for k,v in job.items() if k not in ('process', 'file', 'owner')}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass  # Access tokens must not appear in request logs.
-    def send(self, status, data, mime='application/json; charset=utf-8'):
+    def send(self, status, data, mime='application/json; charset=utf-8', headers=None):
         body = json.dumps(data, ensure_ascii=False).encode() if isinstance(data, dict) else data
         self.send_response(status)
         self.send_header('Content-Type', mime)
@@ -225,29 +267,42 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('X-Frame-Options', 'DENY')
+        for key, value in (headers or {}).items(): self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
     def authorized(self):
+        if CLOUD: return bool(self.session_id())
         supplied = self.headers.get('X-Access-Token') or parse_qs(urlsplit(self.path).query).get('token', [''])[0]
         return secrets.compare_digest(supplied, TOKEN)
+    def session_id(self):
+        return read_session(self.headers.get('Cookie', ''))
+    def can_view(self, job):
+        return job is not None and (not CLOUD or job.get('owner') == self.session_id())
     def do_GET(self):
         path = urlsplit(self.path).path
+        if path == '/healthz':
+            ready = (ROOT/'bin/yt-dlp').is_file() and Path(FFMPEG).is_file() and bool(NODE)
+            return self.send(200 if ready else 503, {'ready': ready})
         if path in STATIC_FILES:
             filename, mime = STATIC_FILES[path]
-            return self.send(200, (ROOT/'web'/filename).read_bytes(), mime)
-        if not self.authorized(): return self.send(401, {'error':'請使用啟動視窗提供的完整網址開啟。'})
+            headers = {}
+            if CLOUD and path == '/' and not self.session_id():
+                headers['Set-Cookie'] = 'mpdl_session=' + create_session() + '; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict'
+            return self.send(200, (ROOT/'web'/filename).read_bytes(), mime, headers)
+        if not self.authorized(): return self.send(401, {'error':'連線已失效，請重新整理頁面。' if CLOUD else '請使用啟動視窗提供的完整網址開啟。'})
         if path == '/api/status':
-            return self.send(200, {'ready': (ROOT/'bin/yt-dlp').is_file() and Path(FFMPEG).is_file(), 'youtube_ready': bool(NODE), 'local_url': LOCAL_URL, 'lan_url': LAN_URL, 'platforms': PLATFORMS})
+            cleanup_expired()
+            return self.send(200, {'ready': (ROOT/'bin/yt-dlp').is_file() and Path(FFMPEG).is_file(), 'youtube_ready': bool(NODE), 'mode': 'cloud' if CLOUD else 'local', 'local_url': '' if CLOUD else LOCAL_URL, 'lan_url': '' if CLOUD else LAN_URL, 'platforms': PLATFORMS})
         if path.startswith('/api/jobs/'):
             jid = path.split('/')[-1]
             with LOCK:
                 job = JOBS.get(jid)
-                return self.send(200, public_job(job)) if job else self.send(404, {'error':'找不到這筆下載，可能已重新啟動。'})
+                return self.send(200, public_job(job)) if self.can_view(job) else self.send(404, {'error':'找不到這筆下載，可能已過期或重新啟動。'})
         if path.startswith('/files/'):
             jid = path.split('/')[-1]
             with LOCK:
                 job = JOBS.get(jid)
-                f = Path(job['file']) if job and job['state'] == 'done' else None
+                f = Path(job['file']) if self.can_view(job) and job['state'] == 'done' else None
             if not f or not f.is_file(): return self.send(404, {'error':'檔案尚未完成或已被移除。'})
             self.send_response(200)
             self.send_header('Content-Type', 'audio/mpeg' if f.suffix == '.mp3' else 'video/mp4')
@@ -262,9 +317,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send(404, {'error':'找不到頁面'})
     def do_POST(self):
-        if not self.authorized(): return self.send(401, {'error':'連線已失效，請重新開啟啟動視窗提供的網址。'})
+        if not self.authorized(): return self.send(401, {'error':'連線已失效，請重新整理頁面。' if CLOUD else '連線已失效，請重新開啟啟動視窗提供的網址。'})
         origin = self.headers.get('Origin')
-        if origin and origin != 'http://' + self.headers.get('Host', ''):
+        if not allowed_origin(origin, self.headers.get('Host', '')):
             return self.send(403, {'error':'不允許其他網站發起下載。'})
         path = urlsplit(self.path).path
         try:
@@ -284,20 +339,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('下載元件尚未就緒。')
                 if platform == 'youtube' and not NODE:
                     raise ValueError('YouTube 下載需要 Node.js，請安裝後重新啟動；IG、FB 可繼續使用。')
+                cleanup_expired()
                 with LOCK:
                     if sum(j['state'] in ('queued','running') for j in JOBS.values()) >= 3:
                         return self.send(429, {'error':'目前已有 3 筆下載，請稍後再試。'})
                     jid = uuid.uuid4().hex
-                    JOBS[jid] = dict(id=jid, url=url, platform=platform, format=fmt, quality=quality, state='queued', progress=0, title='正在讀取影片…', message='等待下載', created=time.time())
+                    JOBS[jid] = dict(id=jid, owner=self.session_id() if CLOUD else None, url=url, platform=platform, format=fmt, quality=quality, state='queued', progress=0, title='正在讀取影片…', message='等待下載', created=time.time())
                 threading.Thread(target=worker, args=(jid,), daemon=True).start()
                 return self.send(202, {'id':jid})
             if path.startswith('/api/cancel/'):
                 jid = path.split('/')[-1]
                 with LOCK:
                     job = JOBS.get(jid)
-                    if not job: return self.send(404, {'error':'找不到下載'})
+                    if not self.can_view(job): return self.send(404, {'error':'找不到下載'})
                     if job['state'] in ('queued','running'):
                         job['state'], job['message'] = 'cancelled', '已取消下載'
+                        job['finished'] = time.time()
                         p = job.get('process')
                         if p and p.poll() is None:
                             try: os.killpg(p.pid, signal.SIGTERM)
@@ -316,20 +373,30 @@ def lan_ip():
     return socket.gethostbyname(socket.gethostname())
 
 LOCAL_URL = f'http://127.0.0.1:{PORT}/#token={TOKEN}'
-try: LAN_URL = f'http://{lan_ip()}:{PORT}/#token={TOKEN}'
+try: LAN_URL = '' if CLOUD else f'http://{lan_ip()}:{PORT}/#token={TOKEN}'
 except OSError: LAN_URL = ''
 
 if __name__ == '__main__':
     server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
-    print('TubeDrop 已啟動。請保持這個視窗開啟。', flush=True)
-    print('這台 Mac：' + LOCAL_URL, flush=True)
-    print('同一 Wi-Fi：' + LAN_URL, flush=True)
+    if CLOUD:
+        print(f'MPDL cloud server listening on port {PORT}', flush=True)
+    else:
+        print('TubeDrop 已啟動。請保持這個視窗開啟。', flush=True)
+        print('這台 Mac：' + LOCAL_URL, flush=True)
+        print('同一 Wi-Fi：' + LAN_URL, flush=True)
     if os.environ.get('TUBEDROP_OPEN') == '1':
         import webbrowser
         webbrowser.open(LOCAL_URL)
+    stop_cleanup = threading.Event()
+    def cleanup_loop():
+        while not stop_cleanup.wait(60): cleanup_expired()
+    if CLOUD: threading.Thread(target=cleanup_loop, daemon=True).start()
+    def shutdown_signal(signum, frame): raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, shutdown_signal)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally:
+        stop_cleanup.set()
         with LOCK:
             for job in JOBS.values():
                 p = job.get('process')

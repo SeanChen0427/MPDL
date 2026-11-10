@@ -1,0 +1,10 @@
+.git
+.DS_Store
+**/__pycache__
+**/*.pyc
+TubeDrop/downloads
+TubeDrop/bin/yt-dlp
+.playwright-mcp
+封存
+docs
+tubedrop-*.png

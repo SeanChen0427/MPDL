@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -187,6 +188,116 @@ class APITests(unittest.TestCase):
             server.JOBS['test']['state'] = 'done'
             self.assertEqual(self.request('/files/test', token=False)[0], 401)
             self.assertEqual(self.request('/files/test'), (200, b'test media bytes'))
+
+
+class CloudTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cloud_patch = patch.object(server, 'CLOUD', True)
+        cls.cloud_patch.start()
+        cls.http = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        cls.thread = threading.Thread(target=cls.http.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f'http://127.0.0.1:{cls.http.server_port}'
+        cls.origin = f'https://127.0.0.1:{cls.http.server_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.http.shutdown()
+        cls.http.server_close()
+        cls.thread.join()
+        cls.cloud_patch.stop()
+
+    def setUp(self):
+        server.JOBS.clear()
+        self.cookie = 'mpdl_session=' + server.create_session()
+        self.other_cookie = 'mpdl_session=' + server.create_session()
+        self.worker_patch = patch.object(server, 'worker')
+        self.worker_patch.start()
+        self.addCleanup(self.worker_patch.stop)
+
+    def request(self, path, body=None, cookie=None, origin=None):
+        headers = {'Cookie': self.cookie if cookie is None else cookie}
+        data = json.dumps(body).encode() if body is not None else None
+        if data is not None:
+            headers['Origin'] = self.origin if origin is None else origin
+            headers['Content-Type'] = 'application/json'
+        try:
+            response = urlopen(Request(self.base + path, data=data, headers=headers), timeout=5)
+        except HTTPError as e:
+            response = e
+        with response:
+            raw = response.read()
+            value = json.loads(raw) if response.headers.get_content_type() == 'application/json' else raw
+            return response.status, value, response.headers
+
+    def test_homepage_creates_secure_browser_session(self):
+        status, _, headers = self.request('/', cookie='')
+        self.assertEqual(status, 200)
+        cookie = headers['Set-Cookie']
+        for flag in ('HttpOnly', 'Secure', 'SameSite=Strict', 'Max-Age=86400'):
+            self.assertIn(flag, cookie)
+        self.assertIsNotNone(server.read_session(cookie))
+        self.assertEqual(self.request('/api/status', cookie=cookie)[0], 200)
+        self.assertIsNone(self.request('/')[2].get('Set-Cookie'))
+
+    def test_cloud_rejects_missing_tampered_and_expired_sessions(self):
+        for cookie in ('', self.cookie[:-1] + ('a' if self.cookie[-1] != 'a' else 'b'), 'mpdl_session=' + server.create_session(now=0)):
+            with self.subTest(cookie=cookie):
+                self.assertEqual(self.request('/api/status', cookie=cookie)[0], 401)
+        self.assertEqual(self.request('/api/status?token=' + server.TOKEN, cookie='')[0], 401)
+
+    def test_https_origin_works_behind_proxy_without_trusting_forwarded_headers(self):
+        body = {'url': 'https://instagram.com/reel/CDUMkliABpa/', 'format': 'mp4'}
+        self.assertEqual(self.request('/api/prepare', body)[0], 200)
+        for origin in ('https://evil.test', 'http://127.0.0.1:' + str(self.http.server_port), '', 'null'):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.request('/api/prepare', body, origin=origin)[0], 403)
+
+    def test_other_browser_cannot_read_cancel_or_download_a_job(self):
+        status, created, _ = self.request('/api/jobs', {'url': 'https://facebook.com/reel/123/', 'format': 'mp4'})
+        self.assertEqual(status, 202)
+        jid = created['id']
+        status, job, _ = self.request('/api/jobs/' + jid)
+        self.assertEqual(status, 200)
+        self.assertNotIn('owner', job)
+        self.assertEqual(self.request('/api/jobs/' + jid, cookie=self.other_cookie)[0], 404)
+        self.assertEqual(self.request('/api/cancel/' + jid, {}, cookie=self.other_cookie)[0], 404)
+        with tempfile.TemporaryDirectory() as folder:
+            f = Path(folder) / 'test.mp4'
+            f.write_bytes(b'private media')
+            server.JOBS[jid].update(state='done', file=str(f))
+            self.assertEqual(self.request('/files/' + jid, cookie=self.other_cookie)[0], 404)
+            self.assertEqual(self.request('/files/' + jid)[:2], (200, b'private media'))
+
+    def test_status_does_not_expose_local_addresses_or_access_tokens(self):
+        status, data, _ = self.request('/api/status')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['mode'], 'cloud')
+        self.assertEqual(data['local_url'], '')
+        self.assertEqual(data['lan_url'], '')
+        self.assertNotIn(server.TOKEN, json.dumps(data))
+
+    def test_healthcheck_is_public_and_reports_missing_components(self):
+        self.assertEqual(self.request('/healthz', cookie='')[0], 200)
+        with patch.object(server, 'NODE', None):
+            self.assertEqual(self.request('/healthz', cookie='')[:2], (503, {'ready': False}))
+
+    def test_cleanup_only_removes_expired_completed_cloud_jobs(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'TUBEDROP_DOWNLOAD_DIR': folder}):
+            old, active, recent = 'a' * 32, 'b' * 32, 'c' * 32
+            for jid in (old, active, recent):
+                (Path(folder)/jid).mkdir()
+                (Path(folder)/jid/'file.mp4').write_bytes(b'media')
+            server.JOBS.update({old: {'state': 'done', 'finished': 0}, active: {'state': 'running', 'created': 0}, recent: {'state': 'done', 'finished': 10000}})
+            server.cleanup_expired(now=10001)
+            self.assertNotIn(old, server.JOBS)
+            self.assertFalse((Path(folder)/old).exists())
+            self.assertTrue((Path(folder)/active/'file.mp4').is_file())
+            self.assertTrue((Path(folder)/recent/'file.mp4').is_file())
+            with patch.object(server, 'CLOUD', False):
+                server.cleanup_expired(now=999999)
+            self.assertIn(recent, server.JOBS)
 
 
 class WorkerTests(unittest.TestCase):
