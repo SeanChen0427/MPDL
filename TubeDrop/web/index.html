@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="description" content="熊恩Sean 課程專屬影片下載工具，貼上 YouTube、Instagram 或 Facebook 網址，儲存 MP4 影片或 MP3 音訊。">
+  <title>影片與音訊下載工具 - 熊恩Sean 課程專屬</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#form">跳到下載工具</a>
+<svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2m3 6a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13M9 9l12-2"/><ellipse cx="6" cy="18" rx="3" ry="3"/><ellipse cx="18" cy="16" rx="3" ry="3"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4M10 5h4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M15 9V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h4"/></symbol>
+  <symbol id="i-instagram" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><path d="M17.5 6.5h.01"/></symbol>
+  <symbol id="i-facebook" viewBox="0 0 24 24"><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3Z"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></symbol>
+  <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/></symbol>
+</svg>
+<main class="shell">
+  <header class="hero">
+    <img class="hero-logo" src="/assets/course-logo.jpg" alt="熊恩Sean Logo" width="96" height="96">
+    <span class="series-pill">熊恩Sean 社群經營 x AI實戰 課程專屬</span>
+    <h1>影片與音訊下載工具</h1>
+    <p class="intro">貼上 YouTube、Instagram 或 Facebook 網址<br>把需要的影片或聲音，儲存到你的裝置。</p>
+    <div class="platforms" aria-label="支援的平台"><span>YouTube</span><span>Instagram · IG</span><span>Facebook · FB</span></div>
+    <span class="badge" id="connection" data-state="waiting" role="status">正在連線</span>
+  </header>
+
+  <form class="panel" id="form">
+    <div class="card-tags"><span class="step-pill">STEP 01 · LINK</span><span class="tag-label">MP4 / MP3</span></div>
+    <h2 class="card-title">貼上連結，選擇下載格式</h2>
+    <div>
+      <label class="label" for="url">影片網址</label>
+      <div class="urlrow">
+        <svg aria-hidden="true"><use href="#i-link"/></svg>
+        <input id="url" type="url" placeholder="貼上 YouTube、IG 或 FB 影片連結" required autocomplete="off" aria-describedby="urlhint formerror">
+        <button type="button" class="paste" id="paste">貼上</button>
+      </div>
+      <p class="hint" id="urlhint">支援公開影片與 Reels；多影片貼文只下載第一支影片，不支援限時動態。</p>
+    </div>
+    <div class="formgrid">
+      <div>
+        <span class="label" id="formatlabel">下載格式</span>
+        <div class="segments" role="group" aria-labelledby="formatlabel">
+          <button type="button" class="segment" data-format="mp4" aria-pressed="true"><svg aria-hidden="true"><use href="#i-video"/></svg><strong>MP4</strong><small>影片＋原有聲音</small></button>
+          <button type="button" class="segment" data-format="mp3" aria-pressed="false"><svg aria-hidden="true"><use href="#i-music"/></svg><strong>MP3</strong><small>只有聲音</small></button>
+        </div>
+      </div>
+      <div>
+        <label class="label" for="quality" id="qualitylabel">影片畫質</label>
+        <select id="quality">
+          <option value="best">最高可用畫質</option>
+          <option value="2160">最高 4K · 2160p</option>
+          <option value="1440">最高 2K · 1440p</option>
+          <option value="1080">最高 Full HD · 1080p</option>
+          <option value="720">最高 HD · 720p</option>
+        </select>
+        <p class="hint" id="qualityhint">依影片提供的畫質下載，不會放大低畫質來源。</p>
+      </div>
+    </div>
+    <button class="primary" id="submit" disabled type="submit"><svg aria-hidden="true"><use href="#i-download"/></svg>開始下載</button>
+    <p class="footnote">完成後，按「儲存檔案」下載到目前使用的裝置。</p>
+    <div id="formerror" class="error hidden" role="alert"></div>
+  </form>
+
+  <section class="downloads" aria-labelledby="jobsheading">
+    <div class="sectionline"><div><span class="step-pill">STEP 02 · SAVE</span><h2 id="jobsheading">本次下載</h2></div><span>下載與轉檔由 Mac 處理</span></div>
+    <div id="jobs"><div class="empty" id="empty"><span class="empty-icon"><svg aria-hidden="true"><use href="#i-download"/></svg></span><strong>準備好第一支影片了嗎？</strong><p>貼上網址、選好格式，下載進度會顯示在這裡。</p></div></div>
+  </section>
+
+  <section class="panel share" aria-labelledby="phoneheading">
+    <div class="card-tags"><span class="step-pill">STEP 03 · MOBILE</span><span class="tag-label">同一個 WI-FI</span></div>
+    <div class="share-row"><div><h2 class="card-title" id="phoneheading">手機也能下載</h2><p>手機與 Mac 連上同一個 Wi-Fi，再開啟連線網址。<br>使用時請保持 Mac 開機及工具執行。</p></div><button class="secondary" id="share" disabled><svg aria-hidden="true"><use href="#i-copy"/></svg>複製手機連線網址</button></div>
+    <details class="help"><summary>哪些影片可以下載？</summary><p>支援 YouTube 單支影片與 Shorts、IG Reels 與含影片的貼文、FB Reels 與公開影片。多影片貼文只下載第一支影片；沒有聲音的影片只能存成 MP4。</p><p>私人、需登入或受平台限制的內容可能無法下載。FB 分享網址若無法展開，請在瀏覽器開啟影片後，複製完整的影片網址重試。</p></details>
+    <p class="usage-note">請下載自己擁有或已獲授權的內容。檔案會保留在 Mac 的 downloads 資料夾。</p>
+  </section>
+
+  <footer>
+    <p class="footer-label">Connect with Sean</p>
+    <div class="social-links">
+      <a class="social-link ig" href="https://www.instagram.com/c.ksean/" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-instagram"/></svg>Instagram</a>
+      <a class="social-link fb" href="https://www.facebook.com/profile.php?id=61577505264423" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-facebook"/></svg>Facebook</a>
+      <a class="social-link threads" href="https://www.threads.com/@c.ksean" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-at"/></svg>Threads</a>
+      <a class="social-link line" href="https://lin.ee/oDg90C1" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-message"/></svg>LINE</a>
+    </div>
+    <p class="copyright">© 熊恩Sean • AI 實戰教學系列工具</p>
+    <button class="smallbutton" id="backtotop" type="button">回到頂端 ↑</button>
+  </footer>
+</main>
+<div class="toast hidden" role="status" id="toast"></div>
+</body>
+</html>

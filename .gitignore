@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+TubeDrop/downloads/
+TubeDrop/bin/yt-dlp
+*.part
+*.ytdl
+.playwright-mcp/
+封存/
+docs/移轉清單.json
+docs/專案進度.md
+tubedrop-*.png
